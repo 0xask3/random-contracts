@@ -13,6 +13,7 @@ contract VestedICO is Context, ReentrancyGuard, Ownable {
 
     struct Plan {
         uint16 discountPerc; //with 2 additional zeros
+        uint16 apy; //with 2 additional zeros
         uint32 startDate; //timestamp
         uint32 endDate; //timestamp
         uint32 lockPeriod; //In seconds
@@ -56,6 +57,7 @@ contract VestedICO is Context, ReentrancyGuard, Ownable {
 
     function setPlan(
         uint8 _planId,
+        uint16 apy, //with 2 additional zeros
         uint16 discountPerc, //with 2 additional zeros
         uint32 startDate, //timestamp
         uint32 endDate, //timestamp
@@ -66,6 +68,7 @@ contract VestedICO is Context, ReentrancyGuard, Ownable {
     ) external onlyOwner {
         Plan storage plan = plans[_planId];
 
+        plan.apy = apy;
         plan.discountPerc = discountPerc;
         plan.startDate = startDate;
         plan.endDate = endDate;
@@ -157,8 +160,11 @@ contract VestedICO is Context, ReentrancyGuard, Ownable {
         );
 
         user.isClaimed = true;
-        _token.safeTransfer(msg.sender, user.tokensReceived);
-        emit TokensClaimed(planId, user.tokensReceived, block.timestamp);
+        uint256 tokensToSend = user.tokensReceived +
+            ((user.tokensReceived * plans[planId].apy) / 10000);
+
+        _token.safeTransfer(msg.sender, tokensToSend);
+        emit TokensClaimed(planId, tokensToSend, block.timestamp);
     }
 
     function withdrawAllToken(address token, uint256 amount)

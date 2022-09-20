@@ -18,28 +18,34 @@ contract VestedICO is Context, ReentrancyGuard, Ownable {
         uint32 endDate; //timestamp
         uint32 lockPeriod; //In seconds
         uint16 totalInvestors;
-        uint256 minPerUser; // In eth
-        uint256 maxPerUser; // In eth
-        uint256 hardCap; //In eth
-        uint256 ethRaised;
         uint256 tokensSold;
+    }
+
+    struct Token {
+        bool isSupported;
+        uint256 minPerUser;
+        uint256 maxPerUser;
+        uint256 hardCap;
+        uint256 totalRaised;
     }
 
     struct User {
         bool isClaimed;
         uint256 purchaseTime;
-        uint256 ethSpent;
+        mapping(address => uint256) tokenSpent;
         uint256 tokensReceived;
     }
 
     mapping(uint8 => Plan) public plans;
     mapping(uint8 => mapping(address => User)) public users;
+    mapping(address => Token) public tokens;
 
     IERC20 public _token;
     IUniswapV2Router02 private _router;
 
     event TokensPurchased(
         uint8 planId,
+        address token,
         address indexed purchaser,
         uint256 value,
         uint256 amount
@@ -55,16 +61,28 @@ contract VestedICO is Context, ReentrancyGuard, Ownable {
         _router = router;
     }
 
+    function setToken(
+        address tkn,
+        bool isSupported,
+        uint256 minPerUser, // with decimals
+        uint256 maxPerUser, // with decimals
+        uint256 hardCap // with decimals
+    ) external onlyOwner {
+        Token storage token = tokens[tkn];
+
+        token.isSupported = isSupported;
+        token.minPerUser = minPerUser;
+        token.maxPerUser = maxPerUser;
+        token.hardCap = hardCap;
+    }
+
     function setPlan(
         uint8 _planId,
         uint16 apy, //with 2 additional zeros
         uint16 discountPerc, //with 2 additional zeros
         uint32 startDate, //timestamp
         uint32 endDate, //timestamp
-        uint32 lockPeriod, //In seconds
-        uint256 minPerUser, // In eth
-        uint256 maxPerUser, // In eth
-        uint256 hardCap //In eth
+        uint32 lockPeriod //In seconds
     ) external onlyOwner {
         Plan storage plan = plans[_planId];
 
@@ -73,40 +91,50 @@ contract VestedICO is Context, ReentrancyGuard, Ownable {
         plan.startDate = startDate;
         plan.endDate = endDate;
         plan.lockPeriod = lockPeriod;
-        plan.minPerUser = minPerUser;
-        plan.maxPerUser = maxPerUser;
-        plan.hardCap = hardCap;
     }
 
-    function buyTokens(uint8 planId) external payable nonReentrant {
-        uint256 ethAmount = msg.value;
-        _preValidatePurchase(planId, msg.sender, ethAmount);
+    function buyTokens(
+        uint8 planId,
+        address token,
+        uint256 amount
+    ) external payable nonReentrant {
+        uint256 ethAmount;
+        if (token == address(0)) {
+            ethAmount = msg.value;
+        } else {
+            IERC20(token).transferFrom(msg.sender, address(this), amount);
+            ethAmount = amount;
+        }
+
+        _preValidatePurchase(planId, msg.sender, token, ethAmount);
 
         Plan storage plan = plans[planId];
 
-        uint256 tokens = _getTokenAmount(planId, ethAmount);
+        uint256 tokensGot = _getTokenAmount(planId, token, ethAmount);
 
         plan.totalInvestors++;
-        plan.ethRaised += msg.value;
-        plan.tokensSold += tokens;
+        plan.tokensSold += tokensGot;
+        tokens[token].totalRaised += amount;
 
-        _processPurchase(planId, msg.value, tokens);
-        emit TokensPurchased(planId, msg.sender, msg.value, tokens);
+        _processPurchase(planId, token, ethAmount, tokensGot);
+        emit TokensPurchased(planId, token, msg.sender, ethAmount, tokensGot);
     }
 
     function _preValidatePurchase(
         uint8 planId,
         address user,
+        address tkn,
         uint256 ethAmount
     ) internal view {
         Plan memory plan = plans[planId];
+        Token memory token = tokens[tkn];
 
         require(
-            ethAmount >= plan.minPerUser && ethAmount <= plan.maxPerUser,
+            ethAmount >= token.minPerUser && ethAmount <= token.maxPerUser,
             "Amount exceeds limit"
         );
         require(
-            plan.ethRaised + ethAmount <= plan.hardCap,
+            token.totalRaised + ethAmount <= token.hardCap,
             "Exceeding hardcap"
         );
         require(
@@ -122,32 +150,38 @@ contract VestedICO is Context, ReentrancyGuard, Ownable {
 
     function _processPurchase(
         uint8 planId,
-        uint256 ethAmount,
+        address token,
+        uint256 amount,
         uint256 tokenAmount
     ) internal {
         User storage user = users[planId][msg.sender];
 
-        user.ethSpent = ethAmount;
+        user.tokenSpent[token] = amount;
         user.purchaseTime = block.timestamp;
         user.tokensReceived = tokenAmount;
     }
 
-    function _getTokenAmount(uint8 planId, uint256 ethAmount)
-        internal
-        view
-        returns (uint256)
-    {
-        address[] memory path = new address[](2);
-        path[0] = _router.WETH();
-        path[1] = address(_token);
+    function _getTokenAmount(
+        uint8 planId,
+        address token,
+        uint256 amount
+    ) internal view returns (uint256) {
+        address[] memory path;
+        if (token == address(0)) {
+            path = new address[](2);
+            path[0] = _router.WETH();
+            path[1] = address(_token);
+        } else {
+            path = new address[](3);
+            path[0] = _router.WETH();
+            path[1] = address(_token);
+        }
 
-        uint256 tokens = (_router.getAmountsOut(ethAmount, path))[
+        uint256 tokensOut = (_router.getAmountsOut(amount, path))[
             path.length - 1
         ]; //Actual token amount based on price
-        ethAmount =
-            ethAmount -
-            ((ethAmount * plans[planId].discountPerc) / 10000); //Apply discount
-        uint256 tokensReceived = tokens / ethAmount; //Calculate new amount of tokens
+        amount = amount - ((amount * plans[planId].discountPerc) / 10000); //Apply discount
+        uint256 tokensReceived = tokensOut / amount; //Calculate new amount of tokens
         return tokensReceived;
     }
 
